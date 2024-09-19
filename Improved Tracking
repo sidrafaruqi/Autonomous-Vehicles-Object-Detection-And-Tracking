@@ -1,0 +1,191 @@
+import cv2  # Used for image and video processing.
+import pandas as pd  # For handling data in a tabular format.
+from ultralytics import YOLO  # Loads and runs the YOLOv8 model to detect objects.
+import cvzone  # Used for easily displaying text on frames.
+import Tracker_module as T  # Import your Tracker module
+
+# Load YOLOv8 model
+model = YOLO('yolov8s.pt')
+
+def RGB(event, x, y, flags, param):
+    # Triggered when the mouse moves in the window.
+    if event == cv2.EVENT_MOUSEMOVE:
+        point = [x, y]
+        print(point)
+
+cv2.namedWindow('RGB')
+cv2.setMouseCallback('RGB', RGB)
+
+# Initialize video capture
+cap = cv2.VideoCapture(
+    r"C:\Users\USER\Desktop\uni internship\OBJECT DETECTION AND TRACKING\yolov8-multiple-vehicle-class-main\dashcam.mp4")
+
+# Check if video capture was successful
+if not cap.isOpened():
+    print("Error: Could not open video.")
+    exit()
+
+# Read class names from the coco.txt file
+with open(
+        r"C:\Users\USER\Desktop\uni internship\OBJECT DETECTION AND TRACKING\yolov8-multiple-vehicle-class-main\coco.txt",
+        "r") as my_file:
+    data = my_file.read()
+class_list = data.split("\n")
+
+count = 0
+
+# Initialize trackers for cars, buses, and trucks
+tracker = T.Tracker()  # For cars
+tracker1 = T.Tracker()  # For buses
+tracker2 = T.Tracker()  # For trucks
+
+# Store the center points for each object
+path_cars = {}
+path_buses = {}
+path_trucks = {}
+
+# Limit path length for each object
+max_path_length = 50  # Adjust to control the track line length
+
+# Function to draw a neon line from older points to newer points
+def draw_neon_line(frame, path_points, color=(0, 255, 255), thickness=1):
+    if len(path_points) > 1:
+        for i in range(1, len(path_points)):
+            cv2.line(frame, path_points[i], path_points[i-1], color, thickness)
+
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame or end of video")
+            break
+        count += 1
+
+        # Process every second frame to reduce computation
+        if count % 2 != 0:
+            continue
+
+        frame = cv2.resize(frame, (640, 360))
+
+        # Run object detection
+        results = model.predict(frame, conf=0.5, iou=0.4)
+        a = results[0].boxes.data
+        px = pd.DataFrame(a).astype("float")
+
+        cars, buses, trucks = [], [], []
+        for index, row in px.iterrows():
+            x1 = int(row[0])
+            y1 = int(row[1])
+            x2 = int(row[2])
+            y2 = int(row[3])
+            d = int(row[5])
+
+            # Assign detected objects to categories
+            if 'car' in class_list[d]:
+                cars.append([x1, y1, x2, y2])
+            elif 'bus' in class_list[d]:
+                buses.append([x1, y1, x2, y2])
+            elif 'truck' in class_list[d]:
+                trucks.append([x1, y1, x2, y2])
+
+        # Update trackers for cars, buses, and trucks
+        bbox_idx_cars = tracker.update(cars)
+        bbox_idx_buses = tracker1.update(buses)
+        bbox_idx_trucks = tracker2.update(trucks)
+
+        # Draw paths for cars first, before the bounding boxes
+        for bbox in bbox_idx_cars:
+            x3, y3, x4, y4, id1 = bbox
+            # Adjust the center point to focus on the rear center of the vehicle
+            cx3 = int((x3 + x4) / 2)  # X-coordinate of the center of the bottom line
+            cy3 = int(y4)  # Y-coordinate of the bottom line (rear)
+
+            # Initialize path for the car if not already in the dictionary
+            if id1 not in path_cars:
+                path_cars[id1] = [(cx3, cy3)] * 5  # Create a short initial trail for cars already in the frame
+
+            # Append the current center point to the path
+            path_cars[id1].append((cx3, cy3))
+
+            # Ensure the path doesn't exceed the maximum length
+            if len(path_cars[id1]) > max_path_length:
+                path_cars[id1].pop(0)  # Remove the oldest point to maintain the path length
+
+            # Draw the neon path behind the car (yellow)
+            draw_neon_line(frame, path_cars[id1], (0, 255, 255), 2)
+
+        # Repeat similarly for buses
+        for bbox in bbox_idx_buses:
+            x3, y3, x4, y4, id1 = bbox
+            cx3 = int((x3 + x4) / 2)  # Rear center point for buses
+            cy3 = int(y4)  # Rear center point for buses
+
+            if id1 not in path_buses:
+                path_buses[id1] = [(cx3, cy3)] * 5  # Create a short initial trail for buses already in the frame
+
+            path_buses[id1].append((cx3, cy3))
+            if len(path_buses[id1]) > max_path_length:
+                path_buses[id1].pop(0)
+
+            # Draw the neon path behind the bus (yellow)
+            draw_neon_line(frame, path_buses[id1], (0, 255, 255), 2)
+
+        # Repeat similarly for trucks
+        for bbox in bbox_idx_trucks:
+            x3, y3, x4, y4, id1 = bbox
+            cx3 = int((x3 + x4) / 2)  # Rear center point for trucks
+            cy3 = int(y4)  # Rear center point for trucks
+
+            if id1 not in path_trucks:
+                path_trucks[id1] = [(cx3, cy3)] * 5  # Create a short initial trail for trucks already in the frame
+
+            path_trucks[id1].append((cx3, cy3))
+            if len(path_trucks[id1]) > max_path_length:
+                path_trucks[id1].pop(0)
+
+            # Draw the neon path behind the truck (yellow)
+            draw_neon_line(frame, path_trucks[id1], (0, 255, 255), 2)
+
+        # Draw bounding boxes and IDs for cars
+        for bbox in bbox_idx_cars:
+            x3, y3, x4, y4, id1 = bbox
+            cx3 = int((x3 + x4) / 2)
+            cy3 = int((y3 + y4) / 2)
+
+            # Draw bounding box and label
+            cv2.circle(frame, (cx3, cy3), 4, (255, 0, 0), -1)
+            cv2.rectangle(frame, (x3, y3), (x4, y4), (255, 0, 255), 2)
+            cvzone.putTextRect(frame, f'Car {id1}', (x3, y3 - 10), scale=0.6, thickness=1)
+
+        # Draw bounding boxes and IDs for buses
+        for bbox in bbox_idx_buses:
+            x3, y3, x4, y4, id1 = bbox
+            cx3 = int((x3 + x4) / 2)
+            cy3 = int((y3 + y4) / 2)
+
+            cv2.circle(frame, (cx3, cy3), 4, (0, 255, 0), -1)
+            cv2.rectangle(frame, (x3, y3), (x4, y4), (0, 255, 255), 2)
+            cvzone.putTextRect(frame, f'Bus {id1}', (x3, y3 - 10), scale=0.6, thickness=1)
+
+        # Draw bounding boxes and IDs for trucks
+        for bbox in bbox_idx_trucks:
+            x3, y3, x4, y4, id1 = bbox
+            cx3 = int((x3 + x4) / 2)
+            cy3 = int((y3 + y4) / 2)
+
+            cv2.circle(frame, (cx3, cy3), 4, (255, 255, 0), -1)
+            cv2.rectangle(frame, (x3, y3), (x4, y4), (255, 255, 255), 2)
+            cvzone.putTextRect(frame, f'Truck {id1}', (x3, y3 - 10), scale=0.6, thickness=1)
+
+        # Display the frame
+        cv2.imshow("RGB", frame)
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
