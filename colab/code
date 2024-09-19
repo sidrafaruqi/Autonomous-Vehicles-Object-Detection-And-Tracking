@@ -1,0 +1,195 @@
+import cv2  # Used for image and video processing.
+import pandas as pd  # For handling data in a tabular format.
+from ultralytics import YOLO  # Loads and runs the YOLOv8 model to detect objects.
+import cvzone  # Used for easily displaying text on frames.
+import math
+import torch
+from google.colab import files  # For downloading the output video
+
+class Tracker:
+    def __init__(self):
+        # Store the center positions of the objects
+        self.center_points = {}
+        # Keep the count of the IDs
+        self.id_count = 0
+
+    def update(self, objects_rect):
+        # Objects boxes and ids
+        objects_bbs_ids = []
+
+        # Get center point of new object
+        for rect in objects_rect:
+            x, y, w, h = rect
+            cx = (x + x + w) // 2
+            cy = (y + y + h) // 2
+
+            # Find out if that object was detected already
+            same_object_detected = False
+            for id, pt in self.center_points.items():
+                dist = math.hypot(cx - pt[0], cy - pt[1])
+
+                if dist < 35:
+                    self.center_points[id] = (cx, cy)
+                    objects_bbs_ids.append([x, y, w, h, id])
+                    same_object_detected = True
+                    break
+
+            # New object detected, assign new ID
+            if not same_object_detected:
+                self.center_points[self.id_count] = (cx, cy)
+                objects_bbs_ids.append([x, y, w, h, self.id_count])
+                self.id_count += 1
+
+        # Clean the dictionary by removing unused IDs
+        new_center_points = {}
+        for obj_bb_id in objects_bbs_ids:
+            _, _, _, _, object_id = obj_bb_id
+            center = self.center_points[object_id]
+            new_center_points[object_id] = center
+
+        self.center_points = new_center_points.copy()
+        return objects_bbs_ids
+
+
+# Initialize YOLOv8 model
+model = YOLO('yolov8s.pt')
+
+# Initialize video capture (Update this path with your video in Google Colab)
+cap = cv2.VideoCapture('/content/movingsurrounding.mp4')
+
+# Check if video capture was successful
+if not cap.isOpened():
+    print("Error: Could not open video.")
+    exit()
+
+# Load class names from coco.txt (replace with your file in Colab)
+with open('/content/coco.txt', 'r') as my_file:
+    data = my_file.read()
+class_list = data.split("\n")
+
+count = 0
+
+# Initialize the Tracker classes for tracking cars, buses, and trucks
+tracker = Tracker()  # For cars
+tracker1 = Tracker()  # For buses
+tracker2 = Tracker()  # For trucks
+
+# Store paths of tracked objects
+path_cars = {}
+path_buses = {}
+path_trucks = {}
+
+max_path_length = 10  # Max number of points for each path
+
+# Set up video writer for saving the output in MP4 format
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('/content/output.mp4', fourcc, 20.0, (640, 360))
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+    count += 1
+
+    # Process every second frame to reduce computation
+    if count % 2 != 0:
+        continue
+
+    frame = cv2.resize(frame, (640, 360))
+
+    # Model prediction
+    results = model.predict(frame, conf=0.5, iou=0.4)
+
+    # Move tensor to CPU before processing
+    a = results[0].boxes.data.cpu().numpy()
+
+    # Create a DataFrame
+    px = pd.DataFrame(a).astype("float")
+
+    cars, buses, trucks = [], [], []
+    for index, row in px.iterrows():
+        x1 = int(row[0])
+        y1 = int(row[1])
+        x2 = int(row[2])
+        y2 = int(row[3])
+        d = int(row[5])
+
+        if 'car' in class_list[d]:
+            cars.append([x1, y1, x2, y2])
+        elif 'bus' in class_list[d]:
+            buses.append([x1, y1, x2, y2])
+        elif 'truck' in class_list[d]:
+            trucks.append([x1, y1, x2, y2])
+
+    bbox_idx_cars = tracker.update(cars)
+    bbox_idx_buses = tracker1.update(buses)
+    bbox_idx_trucks = tracker2.update(trucks)
+
+    # Function to draw neon line
+    def draw_neon_line(frame, path_points, color=(0, 255, 255), thickness=2):
+        for i in range(1, len(path_points)):
+            cv2.line(frame, path_points[i-1], path_points[i], color, thickness)
+
+    # Draw paths for cars
+    for bbox in bbox_idx_cars:
+        x3, y3, x4, y4, id1 = bbox
+        cx3 = int(x3 + x4) // 2
+        cy3 = int(y3 + y4) // 2
+
+        if id1 not in path_cars:
+            path_cars[id1] = []
+
+        path_cars[id1].append((cx3, cy3))
+        if len(path_cars[id1]) > max_path_length:
+            path_cars[id1].pop(0)
+
+        draw_neon_line(frame, path_cars[id1], (0, 255, 255), 2)
+
+    # Draw bounding boxes and IDs for cars
+    for bbox in bbox_idx_cars:
+        x3, y3, x4, y4, id1 = bbox
+        cx3 = int(x3 + x4) // 2
+        cy3 = int(y3 + y4) // 2
+
+        cv2.circle(frame, (cx3, cy3), 4, (255, 0, 0), -1)
+        cv2.rectangle(frame, (x3, y3), (x4, y4), (255, 0, 255), 2)
+        cvzone.putTextRect(frame, f'Car {id1}', (x3, y3), 1, 1)
+
+    # Similarly for buses and trucks
+    for bbox in bbox_idx_buses:
+        x3, y3, x4, y4, id1 = bbox
+        cx3 = int(x3 + x4) // 2
+        cy3 = int(y3 + y4) // 2
+
+        if id1 not in path_buses:
+            path_buses[id1] = []
+
+        path_buses[id1].append((cx3, cy3))
+        if len(path_buses[id1]) > max_path_length:
+            path_buses[id1].pop(0)
+
+        draw_neon_line(frame, path_buses[id1], (0, 255, 255), 2)
+
+    for bbox in bbox_idx_trucks:
+        x3, y3, x4, y4, id1 = bbox
+        cx3 = int(x3 + x4) // 2
+        cy3 = int(y3 + y4) // 2
+
+        if id1 not in path_trucks:
+            path_trucks[id1] = []
+
+        path_trucks[id1].append((cx3, cy3))
+        if len(path_trucks[id1]) > max_path_length:
+            path_trucks[id1].pop(0)
+
+        draw_neon_line(frame, path_trucks[id1], (0, 255, 255), 2)
+
+    # Write the frame to the output video
+    out.write(frame)
+
+# Release resources
+cap.release()
+out.release()
+
+# Download the video file
+files.download('/content/output.mp4')
